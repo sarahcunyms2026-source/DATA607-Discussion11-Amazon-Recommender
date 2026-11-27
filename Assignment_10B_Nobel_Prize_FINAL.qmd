@@ -1,0 +1,517 @@
+---
+title: "Assignment 10B: NobelPrize.org — Four Questions Using JSON"
+subtitle: "DATA 607 | Data Acquisition and Management"
+author: "Sarah Abdelrahman"
+date: "2026-11-22"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    theme: cosmo
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Research objective
+
+The objective is to acquire JSON from the official Nobel Prize API, transform nested
+JSON objects into tidy data frames in R, and answer four data-driven questions.
+The fourth question joins laureate birth information with award-time institutional
+affiliations. Analysis includes the Prize in Economic Sciences, which is distinct
+from the five Nobel Prizes established by Alfred Nobel.
+
+**Data source:** [The Nobel Prize API Developer Zone](https://www.nobelprize.org/about/developer-zone-2/),
+[API documentation](https://nobelprize.readme.io/reference/getting-started),
+and [API v2.1 laureates endpoint](https://api.nobelprize.org/2.1/laureates).
+The data are retrieved live at render time; findings may change when the API is updated.
+
+## 1. Setup and data acquisition
+
+```{r setup}
+# Install these once in the R console if necessary:
+# install.packages(c("httr2", "jsonlite", "dplyr", "purrr", "tidyr", "ggplot2", "knitr", "scales", "stringr"))
+
+library(httr2)
+library(jsonlite)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(scales)
+library(stringr)
+
+options(dplyr.summarise.inform = FALSE)
+```
+
+The API returns nested JSON, including a separate array of Nobel Prize awards
+inside each laureate. Pagination is necessary to avoid inadvertently analyzing
+only the first page. We parse as nested R lists (`simplifyVector = FALSE`) so
+optional fields can be handled explicitly.
+
+```{r retrieve-json}
+base_url <- "https://api.nobelprize.org/2.1/laureates"
+page_size <- 100
+
+fetch_page <- function(offset, limit = page_size) {
+  response <- request(base_url) |>
+    req_url_query(offset = offset, limit = limit) |>
+    req_user_agent("DATA607-NobelPrize-educational-analysis/1.0") |>
+    req_timeout(45) |>
+    req_retry(max_tries = 3) |>
+    req_perform()
+  jsonlite::fromJSON(resp_body_string(response), simplifyVector = FALSE)
+}
+
+first_page <- fetch_page(0)
+stopifnot(is.list(first_page$laureates))
+
+# The total count is returned in meta$count. When not provided, pagination
+# continues until a page has fewer rows than requested.
+reported_total <- suppressWarnings(as.integer(first_page$meta$count))
+if (length(reported_total) != 1 || is.na(reported_total)) {
+  reported_total <- NA_integer_
+}
+
+raw_laureates <- first_page$laureates
+next_offset <- length(raw_laureates)
+
+while (next_offset > 0 &&
+       (is.na(reported_total) || next_offset < reported_total)) {
+  next_page <- fetch_page(next_offset)
+  batch <- next_page$laureates
+  if (length(batch) == 0) break
+  raw_laureates <- c(raw_laureates, batch)
+  next_offset <- next_offset + length(batch)
+  if (is.na(reported_total) && length(batch) < page_size) break
+}
+
+stopifnot(length(raw_laureates) > 0)
+cat("API records retrieved:", length(raw_laureates), "\n")
+cat("API reported records:", ifelse(is.na(reported_total), "not supplied", reported_total), "\n")
+cat("Retrieved on:", as.character(Sys.Date()), "\n")
+```
+
+## 2. Transform nested JSON into tidy tables
+
+The `get_path()` helper avoids errors when the API omits an optional nested
+field. We create (1) one row per individual laureate, (2) one row per
+laureate–prize award, and (3) one row per recorded institutional affiliation.
+
+```{r tidy-data}
+get_path <- function(x, ..., default = NA_character_) {
+  keys <- c(...)
+  current <- x
+  for (key in keys) {
+    if (is.null(current) || !is.list(current) || is.null(current[[key]])) {
+      return(default)
+    }
+    current <- current[[key]]
+  }
+  if (is.null(current) || length(current) != 1 ||
+      (is.atomic(current) && is.na(current))) return(default)
+  as.character(current)
+}
+
+get_country <- function(place) {
+  # Prefer present-day country labels where provided, then historical labels.
+  value <- get_path(place, "countryNow", "en")
+  if (is.na(value)) value <- get_path(place, "country", "en")
+  value
+}
+
+get_name <- function(x) {
+  org <- get_path(x, "orgName", "en")
+  if (!is.na(org)) return(org)
+  full <- get_path(x, "fullName", "en")
+  if (!is.na(full)) return(full)
+  first <- get_path(x, "givenName", "en")
+  last <- get_path(x, "familyName", "en")
+  name <- str_squish(paste(ifelse(is.na(first), "", first),
+                           ifelse(is.na(last), "", last)))
+  if (nzchar(name)) name else NA_character_
+}
+
+laureates <- map_dfr(raw_laureates, function(x) {
+  tibble(
+    laureate_id = get_path(x, "id"),
+    name = get_name(x),
+    gender = get_path(x, "gender"),
+    birth_date = get_path(x, "birth", "date"),
+    birth_country = get_country(x$birth$place),
+    is_person = is.na(get_path(x, "orgName", "en"))
+  )
+}) |>
+  distinct(laureate_id, .keep_all = TRUE)
+
+# Handle nullable arrays and retain an explicit key for joins.
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+# Flatten the nested prize array into one row per laureate–prize award.
+awards <- map_dfr(raw_laureates, function(x) {
+  prize_list <- x$nobelPrizes
+  if (is.null(prize_list) || length(prize_list) == 0) return(tibble())
+  map_dfr(seq_along(prize_list), function(i) {
+    p <- prize_list[[i]]
+    tibble(
+      laureate_id = get_path(x, "id"),
+      prize_index = i,
+      award_year = suppressWarnings(as.integer(get_path(p, "awardYear"))),
+      category = get_path(p, "category", "en"),
+      prize_share = get_path(p, "portion"),
+      affiliations = list(p$affiliations %||% list())
+    )
+  })
+})
+
+stopifnot(nrow(awards) > 0)
+
+# Affiliation is not citizenship: it records an institution associated with
+# the laureate at the time of the award, where this information is provided.
+affiliations <- pmap_dfr(
+  awards |> select(laureate_id, prize_index, affiliations),
+  function(laureate_id, prize_index, affiliations) {
+    if (length(affiliations) == 0) return(tibble())
+    map_dfr(affiliations, function(a) {
+      tibble(
+        laureate_id = laureate_id,
+        prize_index = prize_index,
+        institution = get_path(a, "name", "en"),
+        affiliation_country = get_path(a, "country", "en")
+      )
+    })
+  }
+)
+
+award_details <- awards |>
+  select(-affiliations) |>
+  left_join(laureates, by = "laureate_id") |>
+  mutate(decade = (award_year %/% 10) * 10)
+
+kable(tibble(
+  `Tidy table` = c("laureates", "award_details", "affiliations"),
+  `Rows` = c(nrow(laureates), nrow(award_details), nrow(affiliations)),
+  `Unit of analysis` = c("Unique laureate", "Laureate–prize award", "Recorded award affiliation")
+), caption = "Data validation: table sizes")
+```
+
+## Question 1 — Gender representation: How has women's representation among Nobel Prize recipients changed over time?
+
+**Method.** Count each individual laureate–prize recognition within its award decade, excluding organizations and records without a `male` or `female` value. Calculate the percentage classified as female among these records. This is an *award-level* measure: people who received multiple prizes contribute more than once.
+
+```{r question-1}
+q1 <- award_details |>
+  filter(is_person, gender %in% c("female", "male"), !is.na(decade)) |>
+  group_by(decade) |>
+  summarise(
+    female_recognitions = sum(gender == "female"),
+    male_recognitions = sum(gender == "male"),
+    total_recognitions = n(),
+    female_percent = 100 * female_recognitions / total_recognitions,
+    .groups = "drop"
+  ) |>
+  arrange(decade)
+
+knitr::kable(q1 |> mutate(female_percent = round(female_percent, 1)),
+             caption = "Female and male laureate–prize recognitions by decade")
+
+ggplot(q1, aes(x = decade, y = female_percent)) +
+  geom_line(color = "#176A8A", linewidth = 1) +
+  geom_point(color = "#176A8A", size = 2) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Women's representation among Nobel laureate awards",
+       subtitle = "Female percentage among individual awards with known male/female labels",
+       x = "Award decade", y = "Female share of recognitions") +
+  theme_minimal()
+
+if (nrow(q1) >= 2) {
+  cat(sprintf("Answer: Female representation was %.1f%% in the earliest recorded decade (%d) and %.1f%% in the most recent decade (%d).\n",
+              q1$female_percent[1], q1$decade[1],
+              tail(q1$female_percent, 1), tail(q1$decade, 1)))
+}
+```
+
+### Answer and interpretation
+
+```{r question-1-interpretation, results='asis'}
+if (nrow(q1) >= 2) {
+  first <- q1 |> slice(1)
+  last <- q1 |> slice(n())
+  peak <- q1 |> slice_max(female_percent, n = 1, with_ties = FALSE)
+  change_pp <- last$female_percent - first$female_percent
+  cat(sprintf(
+    "Among individual Nobel Prize recognitions with a recorded male/female label, the female share changed from **%.1f%% in the %ds** (%d of %d recognitions) to **%.1f%% in the %ds** (%d of %d recognitions), a change of **%+.1f percentage points**. The highest observed female share was **%.1f%% in the %ds**.\n\n",
+    first$female_percent, first$decade, first$female_recognitions, first$total_recognitions,
+    last$female_percent, last$decade, last$female_recognitions, last$total_recognitions,
+    change_pp, peak$female_percent, peak$decade
+  ))
+}
+```
+
+**Discussion.** Compare percentages rather than raw counts because the total number of awards differs across decades. The current decade may be incomplete. These are *laureate–prize recognitions*, not unique individuals, and the analysis does not measure nominations, the population of eligible researchers, or causes of unequal representation.
+
+## Question 2 — Age at award: Which Nobel Prize categories have the youngest and oldest recipients?
+
+**Method.** Approximate a recipient's age as the award year minus the birth year. Use the same age measure across categories, and compare medians to reduce the influence of unusually young or old recipients. The precise birthday relative to the award ceremony is not incorporated, so the estimate may differ by one year from their exact age.
+
+```{r question-2}
+q2_individual <- award_details |>
+  filter(is_person, !is.na(birth_date), !is.na(award_year), !is.na(category)) |>
+  mutate(
+    birth_year = suppressWarnings(as.integer(stringr::str_sub(birth_date, 1, 4))),
+    approximate_age = award_year - birth_year
+  ) |>
+  filter(!is.na(approximate_age), dplyr::between(approximate_age, 0, 120))
+
+q2 <- q2_individual |>
+  group_by(category) |>
+  summarise(
+    recognitions_with_age = n(),
+    youngest_age = min(approximate_age),
+    median_age = median(approximate_age),
+    oldest_age = max(approximate_age),
+    .groups = "drop"
+  ) |>
+  arrange(median_age)
+
+knitr::kable(q2, caption = "Approximate award ages across prize categories")
+
+ggplot(q2_individual, aes(x = reorder(category, approximate_age, FUN = median),
+                          y = approximate_age)) +
+  geom_boxplot(fill = "#77AADD", outlier.alpha = 0.35) +
+  coord_flip() +
+  labs(title = "Distribution of approximate age at award by category",
+       x = "Nobel Prize category", y = "Approximate age (years)") +
+  theme_minimal()
+
+if (nrow(q2) > 0) {
+  cat(sprintf("Answer: Using median ages, %s has the youngest typical recipients (median %.1f years), while %s has the oldest (median %.1f years).\n",
+              q2$category[1], q2$median_age[1],
+              tail(q2$category, 1), tail(q2$median_age, 1)))
+}
+```
+
+### Answer and interpretation
+
+```{r question-2-interpretation, results='asis'}
+if (nrow(q2) > 0) {
+  lowest_median <- q2 |> filter(median_age == min(median_age))
+  highest_median <- q2 |> filter(median_age == max(median_age))
+  youngest <- q2_individual |> filter(approximate_age == min(approximate_age)) |>
+    distinct(laureate_id, name, category, award_year, approximate_age)
+  oldest <- q2_individual |> filter(approximate_age == max(approximate_age)) |>
+    distinct(laureate_id, name, category, award_year, approximate_age)
+  cat(sprintf(
+    "The category/categories with the **lowest median age**: **%s** (%.1f years). The category/categories with the **highest median age**: **%s** (%.1f years).\n\n",
+    paste(lowest_median$category, collapse = ", "), min(q2$median_age),
+    paste(highest_median$category, collapse = ", "), max(q2$median_age)
+  ))
+  cat(sprintf("The youngest observed recipient(s) had an approximate age of **%d**, and the oldest had an approximate age of **%d**.\n\n",
+              min(q2_individual$approximate_age), max(q2_individual$approximate_age)))
+}
+```
+
+```{r question-2-extreme-examples}
+q2_extremes <- bind_rows(
+  q2_individual |> slice_min(approximate_age, n = 5, with_ties = TRUE) |>
+    mutate(extreme = "Youngest"),
+  q2_individual |> slice_max(approximate_age, n = 5, with_ties = TRUE) |>
+    mutate(extreme = "Oldest")
+) |>
+  distinct(extreme, laureate_id, category, award_year, .keep_all = TRUE) |>
+  select(extreme, name, category, award_year, approximate_age)
+knitr::kable(q2_extremes,
+             caption = "Examples of the youngest and oldest recipients based on approximate ages")
+```
+
+**Discussion.** The median describes a typical recipient more reliably than the minimum or maximum, while the boxplot shows within-category variation. Award age is **approximated using award year minus birth year**; it is not an exact age on the award date. The results show associations, not explanations for why ages differ.
+
+## Question 3 — Geographic distribution: Which birth countries have produced the most Nobel laureates?
+
+**Method.** Count distinct *individual people*, not award events, by the country associated with their birthplace. Use the API's present-day country name (`countryNow`) when available; otherwise use the supplied country name. This assigns historical birthplaces to modern geographic labels when that mapping is available.
+
+```{r question-3}
+q3 <- laureates |>
+  filter(is_person, !is.na(birth_country), nzchar(birth_country)) |>
+  count(birth_country, name = "unique_laureates", sort = TRUE) |>
+  mutate(percent_of_known_birth_country = 100 * unique_laureates /
+           sum(unique_laureates))
+
+knitr::kable(q3 |> head(15) |>
+               mutate(percent_of_known_birth_country =
+                        round(percent_of_known_birth_country, 1)),
+             caption = "Top 15 countries of birth among individual Nobel laureates")
+
+ggplot(q3 |> head(10),
+       aes(x = reorder(birth_country, unique_laureates), y = unique_laureates)) +
+  geom_col(fill = "#26734D") +
+  coord_flip() +
+  labs(title = "Top 10 Nobel laureate birth countries",
+       subtitle = "Distinct people, not the number of prize recognitions",
+       x = "Country of birth", y = "Number of laureates") +
+  theme_minimal()
+
+if (nrow(q3) > 0) {
+  cat(sprintf("Answer: %s ranks first with %d distinct individual laureates (%.1f%% of those with a recorded birth country).\n",
+              q3$birth_country[1], q3$unique_laureates[1],
+              q3$percent_of_known_birth_country[1]))
+}
+```
+
+### Answer and interpretation
+
+```{r question-3-interpretation, results='asis'}
+if (nrow(q3) >= 3) {
+  top3 <- q3 |> slice_head(n = 3)
+  cat(sprintf(
+    "The leading birth country is **%s**, with **%d unique individual laureates** (%.1f%% of individuals with known birth countries). It is followed by **%s** (%d) and **%s** (%d). Together, these three account for **%.1f%%** of laureates with a recorded birth country.\n\n",
+    top3$birth_country[1], top3$unique_laureates[1],
+    top3$percent_of_known_birth_country[1],
+    top3$birth_country[2], top3$unique_laureates[2],
+    top3$birth_country[3], top3$unique_laureates[3],
+    sum(top3$percent_of_known_birth_country)
+  ))
+}
+```
+
+**Discussion.** The table counts each person only once, even if they received more than one award. The results are *historical counts*, not population-adjusted rates; birthplace does not indicate citizenship, research location, or where a person spent their career. Using `countryNow` when available also maps some historical birthplaces to present-day boundaries.
+
+## Question 4 — International affiliations: How frequently have Nobel laureates received awards while affiliated with institutions outside their birth countries?
+
+**Method (advanced joining and comparing).** Join three tidy tables: (1) the person and their birth country, (2) the year/category of each prize recognition, and (3) its recorded institutional affiliations. Match affiliations to specific award records by `laureate_id` and `prize_index`. Compare the country of birth against the institution's country and compute the proportion of *comparable individual award recognitions* with at least one affiliation in another country. An award with several institutions is counted **once**, not several times.
+
+```{r question-4}
+q4_affiliation_rows <- affiliations |>
+  inner_join(awards |> select(laureate_id, prize_index, award_year, category),
+             by = c("laureate_id", "prize_index")) |>
+  inner_join(laureates |>
+               select(laureate_id, name, birth_country, is_person),
+             by = "laureate_id") |>
+  filter(is_person,
+         !is.na(birth_country), nzchar(birth_country),
+         !is.na(affiliation_country), nzchar(affiliation_country)) |>
+  mutate(foreign_affiliation = birth_country != affiliation_country)
+
+# Collapse multiple affiliations for the same award into one observation.
+q4_awards <- q4_affiliation_rows |>
+  group_by(laureate_id, prize_index, name, award_year, category, birth_country) |>
+  summarise(
+    any_foreign_affiliation = any(foreign_affiliation),
+    listed_affiliations = n(),
+    .groups = "drop"
+  )
+
+q4_summary <- q4_awards |>
+  summarise(
+    comparable_award_recognitions = n(),
+    recognitions_with_foreign_affiliation = sum(any_foreign_affiliation),
+    percent_foreign = 100 * recognitions_with_foreign_affiliation /
+      comparable_award_recognitions
+  )
+knitr::kable(q4_summary |> mutate(percent_foreign = round(percent_foreign, 1)),
+             caption = "Frequency of foreign institutional affiliations among comparable award recognitions")
+
+q4_by_category <- q4_awards |>
+  group_by(category) |>
+  summarise(
+    comparable_recognitions = n(),
+    foreign_affiliation_recognitions = sum(any_foreign_affiliation),
+    foreign_percent = 100 * foreign_affiliation_recognitions /
+      comparable_recognitions,
+    .groups = "drop"
+  ) |>
+  arrange(desc(foreign_percent))
+
+knitr::kable(q4_by_category |>
+               mutate(foreign_percent = round(foreign_percent, 1)),
+             caption = "Foreign affiliation frequency by Nobel Prize category")
+
+ggplot(q4_by_category,
+       aes(x = reorder(category, foreign_percent), y = foreign_percent)) +
+  geom_col(fill = "#8C5A9C") +
+  coord_flip() +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Foreign-affiliation share by award category",
+       subtitle = "Among award recognitions with known birth and affiliation countries",
+       x = "Category", y = "Awards with at least one foreign affiliation (%)") +
+  theme_minimal()
+
+if (nrow(q4_summary) > 0 && q4_summary$comparable_award_recognitions[1] > 0) {
+  cat(sprintf("Answer: %d of %d comparable individual award recognitions (%.1f%%) recorded at least one institution in a country different from the recipient's birth country.\n",
+              q4_summary$recognitions_with_foreign_affiliation[1],
+              q4_summary$comparable_award_recognitions[1],
+              q4_summary$percent_foreign[1]))
+} else {
+  cat("Answer: No comparable records with both a birth country and an institutional country were available.\n")
+}
+```
+
+### Coverage check, examples, and interpretation
+
+The following denominator check is essential: we **cannot** treat awards without recorded institutional countries as if they had domestic affiliations. The percentage below uses only award recognitions with a birth country and at least one usable affiliation country.
+
+```{r question-4-coverage, results='asis'}
+all_individual_awards <- award_details |>
+  filter(is_person) |>
+  nrow()
+birth_known_awards <- award_details |>
+  filter(is_person, !is.na(birth_country), nzchar(birth_country)) |>
+  nrow()
+comparable_awards <- nrow(q4_awards)
+
+coverage <- tibble(
+  measure = c("All individual award recognitions",
+              "Individual award recognitions with a birth country",
+              "Award recognitions with comparable birth and affiliation countries"),
+  n = c(all_individual_awards, birth_known_awards, comparable_awards),
+  percent_of_all = round(100 * n / all_individual_awards, 1)
+)
+knitr::kable(coverage, caption = "Availability of geographical data for Question 4")
+
+if (comparable_awards > 0) {
+  cat(sprintf(
+    "\n\n**Answer.** Of **%d comparable award recognitions**, **%d** (%.1f%%) had at least one recorded institution in a country other than the laureate's birth country. This comparison covers **%.1f%% of all individual award recognitions** in the retrieved dataset.\n\n",
+    comparable_awards,
+    q4_summary$recognitions_with_foreign_affiliation[1],
+    q4_summary$percent_foreign[1],
+    100 * comparable_awards / all_individual_awards
+  ))
+}
+```
+
+```{r question-4-examples}
+q4_examples <- q4_affiliation_rows |>
+  filter(foreign_affiliation) |>
+  distinct(laureate_id, prize_index, .keep_all = TRUE) |>
+  select(name, award_year, category, birth_country,
+         institution, affiliation_country) |>
+  arrange(award_year, name) |>
+  head(10)
+knitr::kable(q4_examples,
+             caption = "Illustrative award-time foreign institutional affiliations (not evidence of citizenship)")
+```
+
+**Discussion and limitations.** This finding describes a comparison of *recorded institutional country* with *birth country*, not a change of citizenship or proof that the laureate migrated. A person born in one country may work internationally for many reasons, and several affiliations can be recorded for one award. The API does not provide complete affiliations for every award category, so the observed percentage **must not be generalized to all Nobel laureates**. Country names and historical borders may also differ; this code compares the labels returned by the API, not a fully harmonized geographic crosswalk.
+
+## Conclusion
+
+The four questions illustrate progressively richer use of nested JSON: gender-related trends, approximate age comparisons, geographic birthplace counts, and multi-table joins between laureates, awards, and institutions. The fourth analysis is the
+most demanding because it requires separating entities at different levels of
+the JSON hierarchy, joining them by stable keys, filtering incomplete fields,
+and distinguishing a measured variable (institutional affiliation) from an
+unobserved one (citizenship or migration history).
+
+## Data source and reproducibility
+
+- Nobel Prize Outreach AB. *Nobel Prize API (Version 2.1)*. https://api.nobelprize.org/2.1/laureates
+- NobelPrize.org. *Developer Zone*. https://www.nobelprize.org/about/developer-zone-2/
+- Nobel Prize API documentation. https://nobelprize.readme.io/reference/getting-started
+
+This report requires an internet connection while rendering. Results were generated from API values at rendering time; numerical conclusions are calculated directly from those values rather than typed into the report. No API key is
+required. To reproduce the analysis, open this `.qmd` file in RStudio and click
+**Render**. Because data are retrieved live, the results reflect the contents
+of the API at the time of rendering.
