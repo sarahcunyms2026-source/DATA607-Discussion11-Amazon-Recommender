@@ -1,0 +1,123 @@
+---
+title: "Discussion 11: Amazon's Recommendation System"
+subtitle: "DATA 607 | Data Acquisition and Management | CUNY SPS"
+author: "Sarah Abdelrahman"
+date: 2026-11-26
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-location: right
+    toc-depth: 3
+    toc-expand: true
+    number-sections: true
+    embed-resources: true
+---
+
+**Instructor:** Professor Darwhin Gomez
+
+## Introduction
+
+Amazon's recommender system helps shoppers discover relevant products while supporting business growth. This report applies scenario design, examines publicly documented interface features and recommendation techniques, and proposes measurable improvements.
+
+## Scenario Design
+
+Following Temkin (2004), the analysis considers the goals of both customers and the organization rather than focusing solely on technical functionality.
+
+```{mermaid}
+%%| fig-cap: "Amazon scenario design, adapted from Temkin (2004)."
+flowchart TD
+    A[Scenario Design: Amazon] --> B[1. Who are your target users?]
+    A --> C[2. What are their key goals?]
+    A --> D[3. How can you help them accomplish those goals?]
+    B --> E[Shoppers and Amazon business teams]
+    C --> F[Relevant purchases and sustainable business growth]
+    D --> G[Personalized, compatible and transparent recommendations]
+```
+
+### Scenario Design Summary
+
+| Scenario question | Customer perspective | Amazon perspective |
+|---|---|---|
+| Who are your target users? | New and returning shoppers, including budget-conscious customers. | Retail, merchandising and personalization teams. |
+| What are their key goals? | Find suitable products quickly, compare prices, and purchase confidently. | Improve customer satisfaction, conversion, retention and order value. |
+| How can you help them accomplish those goals? | Recommend relevant alternatives, compatible accessories and diverse products within the customer's budget. | Rank relevant products, reduce shopping friction and encourage repeat purchases and catalog discovery. |
+
+### Customer Perspective
+
+The priority is helping shoppers make informed decisions within their budget, rather than simply encouraging additional purchases.
+
+### Amazon's Business Perspective
+
+The priority is sustainable growth through relevant discovery, customer trust, and repeat purchases. Conversion should be balanced against returns and customer satisfaction.
+
+**Example scenario:** A student needs an affordable laptop for coursework. The shopper benefits from suitable alternatives and compatible accessories; Amazon benefits from a successful purchase and potentially a larger basket. Both benefit when recommendations are genuinely useful rather than merely increasing spending.
+
+## Reverse Engineering
+
+### Documented interface features
+
+A review of Amazon's public descriptions of its shopping interface provides the following evidence. Direct access to the live retail site returned a bot-verification page, so this is a documentation-based interface analysis, not a controlled personal browsing experiment.
+
+| Documented feature | Evidence | Possible interpretation |
+|---|---|---|
+| Homepage Window Display | Amazon (2024a) describes suggestions informed by shopping activity. | Behavioral personalization and candidate ranking. |
+| Help Me Decide | Amazon (2025) describes tailored suggestions after browsing comparable products. | Context-aware ranking using recent interests and preferences. |
+| About You | Amazon (2026) describes controls for shopping preferences and personalization. | Explicit preference feedback can complement implicit behavioral signals. |
+
+These interface features indicate different recommendation contexts; they do not reveal the exact production algorithms or their weights.
+
+### Published interface examples
+
+Amazon's [homepage announcement (2024)](https://www.aboutamazon.com/news/retail/amazon-homepage-redesign-features) contains actual company-published interface illustrations. It describes a shopper who has purchased a comforter receiving suggestions for coordinating bedding. This supports the interpretation that previous purchases inform complementary product discovery.
+
+Amazon's [Help Me Decide announcement (2025)](https://www.aboutamazon.com/news/retail/amazon-things-to-buy-help-me-decide-gen-ai) also includes screenshots of its mobile recommendation interface. The documented camping-tent scenario illustrates how recent browsing and shopping history can inform a recommendation with an explanation.
+
+![Amazon's published Help Me Decide interface: an air fryer recommendation with a personalized explanation and budget and upgrade alternatives. Source: Amazon (2025).](https://assets.aboutamazon.com/d2/d3/1edd283e447a9c8aa0af3ba3582a/inlinehero-landingpage-airfryer-yourtoppick-0924.jpg){width=65%}
+
+The published image shows a recommended Ninja air fryer, an explanation referring to brand and capacity preferences, and separate budget and upgrade options. This suggests that the interface supports both personalized ranking and customer choice; it does not establish how ranking scores are computed.
+
+These linked screenshots are published by Amazon, not captured during an independent shopping session. They support the interface analysis but cannot establish the exact ranking model or its performance.
+
+### Technical approach
+
+Linden, Smith, and York (2003) describe Amazon's item-to-item collaborative filtering. Rather than finding similar customers at recommendation time, the method identifies related products from patterns of customer interactions. Item relationships can be computed in advance and used to retrieve candidates based on a shopper's history. Smith and Linden (2017) describe subsequent developments. More recent Amazon documentation also describes AI-driven personalization incorporating product attributes and shopping information (Amazon, 2024b).
+
+A plausible conceptual workflow is: customer interactions → item relationships and other candidate sources → relevance scoring → ranked recommendations. This is an interpretation, not a verified diagram of Amazon's current production architecture.
+
+### Small illustrative sample
+
+The following synthetic binary interaction matrix demonstrates the historical item-based concept. A 1 indicates a purchase and a 0 indicates no recorded purchase, not dislike.
+
+| Customer | Laptop | Mouse | Laptop case | Coffee maker |
+|---|---:|---:|---:|---:|
+| A | 1 | 1 | 1 | 0 |
+| B | 1 | 1 | 0 | 0 |
+| C | 1 | 0 | 1 | 0 |
+| D | 0 | 0 | 0 | 1 |
+
+Using cosine similarity between product columns, both the mouse and case score approximately 0.816 against the laptop, while the coffee maker scores 0. The first two products are therefore stronger candidates for a laptop shopper in this toy example. These values are calculated from synthetic data, not Amazon customer records or observed recommendations.
+
+## Recommendations for Improvement
+
+| Proposed improvement | Implementation | Evaluation |
+|---|---|---|
+| Context and compatibility | Expand temporary gift-shopping and budget controls; check accessory compatibility. | Return rate, satisfaction, conversion. |
+| Transparency and control | Extend existing preference controls with clear item-level explanations and feedback. | Helpfulness ratings and unwanted recommendation rate. |
+| Diversity and discovery | Re-rank relevant candidates to include new and niche products without sacrificing suitability. | Catalog coverage, diversity, Precision@K on labeled evaluation data. |
+
+Use randomized A/B tests with customer satisfaction and return rates as safeguards alongside conversion. These are proposed evaluations, not measured outcomes.
+
+## Conclusion
+
+Amazon illustrates how item-based collaborative filtering and newer personalization techniques support product discovery. A customer-centered approach should balance commercial performance with relevance, transparency, diversity and user control. Public evidence supports the historical method and documented interface features, but Amazon's exact current ranking system remains proprietary.
+
+## References
+
+- Temkin, B. D. (2004). *Scenario design: A disciplined approach to customer experience*. Forrester Research. (Course-provided reference.)
+- Linden, G., Smith, B., & York, J. (2003). Amazon.com recommendations: Item-to-item collaborative filtering. *IEEE Internet Computing, 7*(1), 76–80. <https://doi.org/10.1109/MIC.2003.1167344> ([Accessible paper copy](https://www.cs.umd.edu/~samir/498/Amazon-Recommendations.pdf))
+- Smith, B., & Linden, G. (2017). Two decades of recommender systems at Amazon.com. *IEEE Internet Computing*. <https://www.amazon.science/publications/two-decades-of-recommender-systems-at-amazon-com>
+- Amazon. (2024a). Amazon's enhanced homepage features make shopping easier and more personalized. <https://www.aboutamazon.com/news/retail/amazon-homepage-redesign-features>
+- Amazon. (2024b). How Amazon is using generative AI to improve product recommendations and descriptions. <https://www.aboutamazon.com/news/retail/amazon-generative-ai-product-search-results-and-descriptions>
+- Amazon. (2025). Amazon’s new AI-powered shopping feature Help Me Decide makes it easy to quickly pick the right product. <https://www.aboutamazon.com/news/retail/amazon-things-to-buy-help-me-decide-gen-ai>
+- Amazon. (2026). Introducing Amazon's About You. <https://www.aboutamazon.com/news/retail/amazon-about-you-personalization-preferences>
